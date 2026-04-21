@@ -1,0 +1,502 @@
+# ESP32 Zigbee Lidar Distance Sensor — User Guide
+## Version 1.9 OTA
+
+---
+
+## Overview
+
+This ESP32-C6 device pairs a VL53L1X Time-of-Flight distance sensor with Zigbee connectivity for home automation. It reports both a smoothed (EMA-filtered) and raw distance value to Hubitat simultaneously, supports OTA firmware updates, and includes a built-in web server for configuration — available whenever the device is in WiFi mode.
+
+**Key Features:**
+- Zigbee distance reporting to Hubitat via two endpoints: EMA-smoothed (ep10) and raw (ep11)
+- Mutually exclusive radio modes — WiFi and Zigbee never run at the same time, eliminating radio interference
+- Three operating modes: Zigbee-only (normal), WiFi-only, and OTA update
+- OTA firmware updates via ElegantOTA web interface
+- Presence detection with configurable distance threshold
+- Stuck-reading watchdog: automatically soft-resets the VL53L1X if the sensor hangs on an implausible repeated value
+- Per-device friendly name via lookup table in the .ino file
+- Factory reset via BOOT button hold (EQP) or Side Button long-press (Nesso N1)
+
+---
+
+## Radio Architecture
+
+The ESP32-C6 cannot reliably run WiFi and Zigbee simultaneously. The device enforces strict mutual exclusivity:
+
+| Mode | Zigbee | WiFi | Purpose |
+|------|--------|------|---------|
+| **Zigbee-only** (normal) | ✅ ON | ❌ OFF | Distance reporting to Hubitat |
+| **WiFi-only** | ❌ OFF | ✅ ON | Web control panel + OTA access |
+| **OTA mode** | ❌ OFF | ✅ ON | Firmware update only |
+
+The device always boots into **Zigbee-only mode** unless a flag has been set to request WiFi-only mode or OTA mode.
+
+---
+
+## Operating Modes
+
+### Zigbee-Only Mode (Normal Operation)
+
+This is the default mode. The device:
+- Reads the VL53L1X sensor every 10 seconds
+- Reports both smoothed and raw distance to Hubitat via two Zigbee endpoints
+- Monitors Zigbee connection; reboots to rejoin if disconnected for more than 5 minutes
+- Keeps WiFi radio OFF
+
+**How to exit:** Use the Hubitat "Enable WiFi Mode" command button to switch to WiFi-only mode, or use the power-cycle OTA trick to enter OTA mode.
+
+---
+
+### WiFi-Only Mode
+
+Entered when Hubitat sends the "Enable WiFi Mode" command (or when the device reboots with the `wifiRequested` flag set). Zigbee is never started. WiFi connects at full power.
+
+The device will retry WiFi connection up to 3 times (30 seconds each) before giving up and rebooting back to Zigbee mode.
+
+**Web control panel** is available at `http://[DEVICE_IP]/` and shows device status plus action buttons.
+
+**Timeout:** After 15 minutes in WiFi-only mode, the device automatically reboots back to Zigbee mode.
+
+**How to exit:** Click the **Return to Zigbee Mode** button on the web control panel, or wait for the 15-minute timeout.
+
+---
+
+### OTA Mode
+
+Entered via the power-cycle trigger (see below), via the `/ota-mode` endpoint while in WiFi-only mode, or via Front Button long-press (Nesso N1 only). Zigbee is never started. The ElegantOTA upload interface is available at `http://[DEVICE_IP]/update`.
+
+**LED indicator:** SOS pattern (· · · — — — · · ·) flashes continuously while OTA mode is active.
+
+**Display indicator (Nesso N1 only):** The display shows the upload URL (`http://[IP]/update`) with "Zigbee OFF" in the footer. During the 15-second OTA entry window immediately after Zigbee starts, the display instead flashes alternating red and black backgrounds with the message "Unplug now to enter OTA mode" and a countdown.
+
+**Timeout:** After 15 minutes with no upload, the device reboots back to Zigbee mode.
+
+**How to exit:** Upload firmware (device reboots automatically), click **Return to Zigbee Mode** on the web page, or wait for the 15-minute timeout.
+
+**Exit via button (Nesso N1 only):** While in OTA mode, hold the **Front Button for 3 seconds** to return immediately to Zigbee mode. A 0.5-second hold shows a confirmation prompt on the display; releasing before 3 seconds cancels.
+
+---
+
+## Distance Reporting
+
+The device always reports both values on every valid sensor reading:
+
+| Endpoint | Description | Zigbee Cluster |
+|----------|-------------|---------------|
+| **ep10** | EMA-smoothed distance | Illuminance (0x0400) |
+| **ep11** | Raw (unsmoothed) distance | Illuminance (0x0400) |
+
+**EMA Smoothing** (Exponential Moving Average, alpha = 0.6) runs continuously on ep10. It reduces sensor noise and produces stable values for dashboards and automations, while ep11 provides the instantaneous reading for applications that need faster response.
+
+**Report interval:** The sensor reads every 10 seconds by default (`SENSOR_READ_INTERVAL_MS`). The Hubitat driver's Minimum Report Interval setting throttles how often the Zigbee stack forwards reports to the hub — if set higher than 10 seconds, Hubitat receives reports at the driver's configured interval. Report Delta (minimum mm change) also controls when a report is sent.
+
+---
+
+## Stuck-Reading Watchdog
+
+The VL53L1X sensor is known to occasionally lock up and repeatedly return a stale short distance (commonly 255 mm) with a valid range status code (0), while the actual target is much farther away.
+
+The sketch includes a watchdog that detects this hang signature and automatically soft-resets and re-configures the sensor:
+
+- A reading increments the stuck counter only when it is **both** repeated **and** below `MIN_PLAUSIBLE_DISTANCE_MM` (default: 300 mm)
+- After `STUCK_READING_LIMIT` (default: 3) consecutive such readings, `reinitSensor()` is called
+- `reinitSensor()` issues a hardware soft-reset via I2C register 0x0000, waits for the sensor to reboot, re-applies all settings, and discards the EMA so a fresh run of good readings starts cleanly
+- Legitimate stable readings at real garage distances are invisible to the watchdog — it only reacts to suspiciously short values that persist
+
+**Configuring for your installation:** Set `MIN_PLAUSIBLE_DISTANCE_MM` to a value safely below the closest real target in your installation. For example, if the nearest a car bumper can get is ~600 mm, use 400. This prevents false resets if the sensor legitimately sees a close object.
+
+---
+
+## Device Naming
+
+Each physical device can be given a friendly name by adding its chip ID to the `deviceMappings[]` table in the .ino file:
+
+```cpp
+const DeviceMapping deviceMappings[] = {
+  { 0x70A95AFEFFCA4C40ULL, "South Car Bay LIDAR" },
+  { 0x6C355AFEFFCA4C40ULL, "North Car Bay LIDAR" },
+};
+```
+
+The device name appears in the Serial Monitor banner, the web control panel, and the Hubitat driver page. If a chip ID is not in the table, the device uses a default name of `LIDAR-` followed by the last 4 hex digits of the chip ID.
+
+---
+
+## LED and Display Status Indicators
+
+| Pattern | Meaning |
+|---------|---------|
+| Fast blinking (300ms) | Zigbee not connected — searching or pairing |
+| Solid on | Zigbee connected and reporting normally |
+| SOS (· · · — — — · · ·) | OTA entry window open (15s after Zigbee starts — unplug now to trigger OTA on next boot) **or** OTA mode active — connect to `/update` to upload firmware |
+
+Both the OTA entry window and OTA mode use the same SOS LED pattern. The Nesso N1 display distinguishes between them (see below).
+
+**Nesso N1 display indicators (in addition to LED):**
+
+| Display | Meaning |
+|---------|---------|
+| Flashing red/black background with countdown | OTA entry window open (15s) — unplug now to trigger OTA mode on next boot |
+| "OTA Update Mode" with URL and "Zigbee OFF" footer | OTA mode active — upload firmware at the shown URL |
+| Normal distance screen | Zigbee-only mode, operating normally |
+
+**Nesso N1 display modes (cycle via Front Button short press):**
+
+| Mode | Display |
+|------|---------|
+| 0 | Normal layout: header bar, smoothed distance (green), raw distance (yellow), footer with connection status and good/bad read counts |
+| 1 | Full-screen: smoothed distance only (green, large font) |
+| 2 | Full-screen: raw distance only (yellow, large font) |
+| 3 | Full-screen: alternates between smoothed (green) and raw (yellow) every 10 seconds *(default)* |
+
+---
+
+## Entering OTA Mode
+
+### Method 1: Power-Cycle Trigger (No Hubitat required)
+
+Use this when you need to update firmware without Hubitat access.
+
+1. **Plug in** — device boots and Zigbee starts
+2. **Watch for the SOS LED pattern** (· · · — — — · · ·) — this signals the 15-second OTA window is open
+3. **Unplug within 15 seconds** of seeing the SOS pattern
+4. **Plug in again** — device detects the flag and enters OTA mode (LED continues SOS)
+5. Navigate to `http://[DEVICE_IP]/update` to upload firmware
+
+> **Note:** If you don't unplug within 15 seconds, the flag clears automatically and normal power interruptions are safe. Simply plug in again and repeat from step 1.
+
+### Method 2: Via Hubitat + WiFi-Only Mode
+
+1. In Hubitat, click **Enable WiFi Mode** on the device page
+2. Device reboots into WiFi-only mode and connects to WiFi
+3. Navigate to `http://[DEVICE_IP]/` for the control panel
+4. Click **Upload OTA Firmware** (goes directly to `/update`) or click **Enter OTA Mode** to reboot into dedicated OTA mode
+5. Upload your `.bin` firmware file
+
+### Method 3: Via the `/ota-mode` Endpoint (while in WiFi-only mode)
+
+Navigate to `http://[DEVICE_IP]/ota-mode` — the device will reboot into OTA mode.
+
+### Method 4: Front Button Long-Press (Nesso N1 only)
+
+While in normal Zigbee mode, hold the **Front Button for 3 seconds**. A 0.5-second hold shows a confirmation prompt; releasing early cancels. On confirmation the device saves a `directOTA` flag (which survives software resets) and reboots into OTA mode.
+
+---
+
+## Web Control Panel
+
+The web interface is available in **WiFi-only mode** and **OTA mode**. Navigate to `http://[DEVICE_IP]/` to see the status page.
+
+### Status Page (`/`)
+
+All modes show a status table with:
+- Device Name
+- Current mode (Zigbee-Only / WiFi-Only / OTA Update Mode)
+- Zigbee connection state (Zigbee-only mode only)
+- IP address, WiFi RSSI (colour-coded: green ≥ −70 dBm, amber ≥ −80, red < −80), channel, and MAC address
+- A warning banner if signal is too weak for a reliable OTA upload
+
+### WiFi-Only Mode Endpoints
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/` | GET | Status page + action buttons |
+| `/update` | GET | ElegantOTA firmware upload interface |
+| `/reboot-wifi` | ANY | Reboot WiFi connection (stays in WiFi-only mode) |
+| `/zigbee-mode` | ANY | Return to Zigbee mode (reboots) |
+| `/ota-mode` | POST/GET | Reboot into OTA mode |
+
+### OTA Mode Endpoints
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/` | GET | Status page + Upload button |
+| `/update` | GET | ElegantOTA firmware upload interface |
+| `/reboot-wifi` | ANY | Reboot WiFi connection (stays in OTA mode) |
+| `/zigbee-mode` | ANY | Return to Zigbee mode (reboots) |
+
+---
+
+## OTA Firmware Upload
+
+### Step 1: Build the Firmware Binary
+
+1. Open Arduino IDE and load your `.ino` sketch
+2. Go to **Sketch → Export Compiled Binary** (`Ctrl+Alt+S`)
+3. Look for `ESP32_C6_LidarDistanceSensor_OTA.ino.bin` in your sketch folder
+
+### Step 2: Upload via ElegantOTA
+
+1. Enter WiFi-only or OTA mode (see above)
+2. Navigate to `http://[DEVICE_IP]/update`
+3. Click **Choose File** and select your `.bin` file
+4. Click **Update** and wait for the progress bar to complete
+5. Device reboots automatically into normal Zigbee mode
+
+> **Important:** Ensure you select a `.bin` file compiled for the correct board target. Uploading a binary built for a different target will brick the device and require USB re-flashing.
+
+---
+
+## Physical Button Control
+
+### EQP (ESP32-C6 Qwiic Pocket)
+
+| Action | Effect |
+|--------|--------|
+| Hold BOOT button 3 seconds | Factory reset — erases Zigbee NVS and reboots into pairing mode |
+
+### Nesso N1
+
+| Action | Effect |
+|--------|--------|
+| Front Button short press (< 0.5s) | Cycle display mode: 0 → 1 → 2 → 3 → 0 |
+| Front Button long press (≥ 3s) in Zigbee mode | Enter OTA mode (saves `directOTA` flag, reboots) |
+| Front Button long press (≥ 3s) in OTA mode | Exit OTA mode — return to Zigbee mode |
+| Side Button short press (< 0.5s) | Reboot (returns to normal Zigbee operation) |
+| Side Button long press (≥ 3s) | Factory reset — erases Zigbee NVS and reboots into pairing mode |
+
+On both boards, holding 0.5–3 seconds shows a confirmation prompt on the display (Nesso N1) or a Serial Monitor message (EQP); releasing before the hold time cancels.
+
+---
+
+## Hubitat Driver (v1.26)
+
+### Current State Attributes
+
+| Attribute | Description |
+|-----------|-------------|
+| `(01) Millimeters` | Smoothed distance in mm (ep10) |
+| `(02) Centimeters` | Smoothed distance in cm |
+| `(03) Meters` | Smoothed distance in m |
+| `(04) Inches` | Smoothed distance in inches |
+| `(05) Feet` | Smoothed distance in feet |
+| `(06) Yards` | Smoothed distance in yards |
+| `(07) Raw Millimeters` | Raw (unsmoothed) distance in mm (ep11) |
+| `(08) Raw Centimeters*` | Raw distance in cm |
+| `(09) Raw Meters*` | Raw distance in m |
+| `(10) Raw Inches*` | Raw distance in inches |
+| `(11) Raw Feet*` | Raw distance in feet |
+| `(12) Raw Yards*` | Raw distance in yards |
+| `Selected Display` | Distance in the unit chosen in preferences |
+| `presence` | `"present"` or `"not present"` based on threshold |
+| `firmwareVersion` | Firmware version string from device (e.g. `1.9 EQP OTA`) |
+| `Distance Summary` | All smoothed units in one string (mm \| cm \| m \| in \| ft \| yd) |
+| `Raw Summary` | All raw units in one string (mm \| cm \| m \| in \| ft \| yd) |
+| `healthStatus` | `"online"` or `"offline"` based on Zigbee message activity |
+| `lastCheckin` | Timestamp of the most recent Zigbee message received |
+
+> **\*** Shown only if "Publish raw converted unit attributes ... as separate events" is enabled
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `enableWiFiMode` | Sends On command to ep12 — device saves flag and reboots into WiFi-only mode |
+| `refresh` | Reads current distance from ep10 |
+| `setPresenceThreshold(mm)` | Sets the distance threshold for presence detection |
+
+### Driver Preferences
+
+| Preference | Default | Description |
+|-----------|---------|-------------|
+| Display Units | mm | Unit shown in `Selected Display` attribute |
+| Presence Detection Threshold | 1500 mm | Distance below this = `"present"` |
+| Minimum Report Interval | 5 sec | Zigbee stack minimum time between reports |
+| Maximum Report Interval | 300 sec | Zigbee stack maximum silence before forced report |
+| Report Delta | 50 mm | Minimum change to trigger a report |
+| Publish Raw Converted Attributes | false | When enabled, also sends separate events for raw cm/m/in/ft/yd; when disabled, these still appear in Raw Summary but are not individual events |
+| Health Timeout | 30 min | Mark device offline if no Zigbee messages received within this window |
+| Enable debug logging | true | Logs raw Zigbee messages to Hubitat log |
+
+> **Report Interval notes:** The sketch reads the sensor every 10 seconds. Setting Minimum Report Interval below 10 seconds has no additional effect. Maximum Report Interval ensures Hubitat receives a heartbeat even when the reading is stable. After changing preferences, click **Save Preferences** to push the new reporting config to the device.
+
+### Pairing / Re-Pairing
+
+The driver fingerprint matches on `manufacturer: "Espressif"` (EQP board) or `manufacturer: "Arduino"` (Nesso N1 board) — there is no `model:` field in the fingerprint. The model string (e.g. `LIDAR_Sensor_v1.9 EQP OTA`) is separately read from the Basic cluster attribute 0x0005 during `configure()` and decoded into the `firmwareVersion` attribute. If you add a new endpoint (e.g. during sketch development), a factory reset and re-pair is required to register the new endpoint with Hubitat.
+
+---
+
+## Troubleshooting
+
+### Device Won't Enter WiFi-Only Mode
+
+- Confirm the Zigbee On command is reaching the device — check the Serial Monitor for `*** WiFi-only mode requested via Zigbee ***`
+- If not seen, verify the driver is sending to `destEndpoint: 12`
+- Try the power-cycle OTA method as an alternative
+
+### OTA Mode: WiFi Won't Connect
+
+The device retries WiFi connection up to 3 times (30 seconds each). After 3 failures it reboots back to Zigbee mode. Check:
+- WiFi credentials in `secrets.h` are correct
+- Network is 2.4GHz (ESP32-C6 does not support 5GHz)
+- Device is within range of the router
+
+### Rapid Reboot → OTA Mode Unexpectedly
+
+If the device enters OTA mode after a crash or USB upload, this means a stale OTA flag was left in NVS. The device checks `esp_reset_reason()` — only a genuine power-on (`ESP_RST_POWERON`) combined with the flag set triggers OTA mode. A USB reset (`ESP_RST_USB`) or software reset (`ESP_RST_SW`) will clear the flag and boot normally. If this recurs, check the Serial Monitor for the reset reason number printed at boot.
+
+Note: the `/ota-mode` HTTP endpoint and the Front Button long-press (Nesso N1) use a separate `directOTA` flag that deliberately accepts any reset reason — this is intentional and will not cause false OTA triggers after crashes.
+
+### Firmware Version Shows "unknown" in Hubitat
+
+1. Ensure you are running driver v1.26 or later
+2. Click **Save Preferences** on the device page to trigger `configure()` which re-reads the model attribute from the device
+3. Check the Hubitat log for `Model string decoded:` — if absent, the `readAttribute(0x0000, 0x0005, [destEndpoint: 10])` response is not arriving
+
+### Distance Readings Seem Inaccurate
+
+- Clean the sensor lens — dust affects readings significantly
+- Ensure the target is within 40mm–4000mm range
+- Avoid highly reflective, transparent, or very dark surfaces
+- The VL53L1X has a 27° field of view — ensure the target fills this cone
+- Compare `(01) Millimeters` (smoothed) vs `(07) Raw Millimeters` — if raw is erratic, the issue is sensor/environment; if smooth is lagging, adjust `EMA_ALPHA` in the sketch
+
+### Sensor Resets Unexpectedly (Stuck-Reading Watchdog)
+
+If you see `[SENSOR] Stuck-reading watchdog fired` in the Serial Monitor, the sensor detected the VL53L1X hang signature (repeated implausibly short readings). This is normal recovery behaviour. If it fires frequently on legitimate targets:
+- Increase `MIN_PLAUSIBLE_DISTANCE_MM` to a value below your closest real target
+- Check sensor wiring and I2C connections
+- Ensure adequate power supply — marginal power can cause spurious sensor readings
+
+### Zigbee Disconnects Frequently
+
+The Zigbee watchdog reboots the device after 5 minutes of disconnection to force a clean rejoin. If disconnects are frequent:
+- Move the device closer to the Hubitat hub or a Zigbee router
+- Avoid running in an area with heavy 2.4GHz interference (microwave ovens, cordless phones)
+- Check the Zigbee channel in Hubitat settings
+
+---
+
+## Quick Reference
+
+### Web Endpoints (WiFi-Only Mode)
+
+| Endpoint | Method | Purpose | Reboot? |
+|----------|--------|---------|---------|
+| `/` | GET | Status page + action buttons | No |
+| `/update` | GET | ElegantOTA firmware upload | After upload |
+| `/reboot-wifi` | ANY | Reboot WiFi (stay in WiFi-only mode) | **Yes** |
+| `/zigbee-mode` | ANY | Return to Zigbee mode | **Yes** |
+| `/ota-mode` | POST/GET | Reboot into OTA mode | **Yes** |
+
+### Web Endpoints (OTA Mode)
+
+| Endpoint | Method | Purpose | Reboot? |
+|----------|--------|---------|---------|
+| `/` | GET | Status page | No |
+| `/update` | GET | ElegantOTA firmware upload | After upload |
+| `/reboot-wifi` | ANY | Reboot WiFi (stay in OTA mode) | **Yes** |
+| `/zigbee-mode` | ANY | Return to Zigbee mode | **Yes** |
+
+### Physical Controls
+
+**EQP (ESP32-C6 Qwiic Pocket)**
+
+| Action | Effect |
+|--------|--------|
+| Hold BOOT button 3 seconds | Factory reset + Zigbee re-pair |
+| Unplug within 15s of SOS LED pattern | Enter OTA mode on next boot |
+
+**Nesso N1**
+
+| Action | Effect |
+|--------|--------|
+| Front Button short press | Cycle display mode (0→1→2→3→0) |
+| Front Button long press (Zigbee mode) | Enter OTA mode |
+| Front Button long press (OTA mode) | Exit OTA mode → return to Zigbee mode |
+| Side Button short press | Reboot (returns to Zigbee mode) |
+| Side Button long press | Factory reset + Zigbee re-pair |
+| Unplug within 15s of SOS LED pattern | Enter OTA mode on next boot |
+
+### Hubitat Commands
+
+| Command | Effect |
+|---------|--------|
+| Enable WiFi Mode | Device reboots into WiFi-only mode |
+| Refresh | Reads current distance immediately |
+| Set Presence Threshold | Updates presence detection threshold |
+
+---
+
+## Network Security
+
+- **WiFi credentials** are stored in `secrets.h` which is excluded from source control
+- **OTA password** can optionally be set in `secrets.h` — required to upload firmware via ElegantOTA
+- The web interface is only active when in WiFi-only or OTA mode; in normal operation WiFi is OFF
+- Only devices on your local network can access the web interface
+- Use WPA2 or WPA3 encryption on your WiFi network
+
+---
+
+## Specifications
+
+**Distance Sensor (VL53L1X):**
+- Range: 40mm to 4000mm
+- Field of View: 27°
+- Accuracy: ±5% (±200mm at 4 meters) at best
+- Timing budget: 200ms (configurable; valid values: 15, 20, 33, 50, 100, 200, 500 ms)
+- Measurement interval: 1000ms (configurable), sketch reads every 10s
+
+**Connectivity:**
+- WiFi: 2.4GHz 802.11 b/g/n (active only in WiFi-only and OTA modes)
+- Zigbee: End Device mode
+- Web server: Port 80 (active only in WiFi-only and OTA modes)
+
+**OTA Updates:**
+- Maximum OTA/WiFi-only session: 15 minutes
+- Auto-timeout returns to Zigbee mode
+- ElegantOTA library (optional password protection)
+
+**Power:**
+- USB-C powered
+- Typical consumption: ~100–200mA
+
+---
+
+## Additional Resources
+
+- **Arduino IDE:** https://www.arduino.cc/
+- **SparkFun ESP32-C6 Qwiic Pocket:** SparkFun product page
+- **VL53L1X Library:** SparkFun VL53L1X 4m Laser Distance Sensor (Arduino Library Manager)
+- **ElegantOTA:** https://github.com/ayushsharma82/ElegantOTA
+- **Hubitat Community:** https://community.hubitat.com/
+
+---
+
+## Appendix: Example Use Cases
+
+### Use Case 1: Parking Garage Monitor
+- Mount sensor at entry to parking space, pointed at the car
+- Set presence threshold in Hubitat to ~2000mm
+- Use `(01) Millimeters` (smoothed) for dashboard display
+- Use `presence` attribute to trigger garage lights or notifications
+- Set Report Delta to ~100mm to reduce unnecessary traffic
+- Set `MIN_PLAUSIBLE_DISTANCE_MM` to ~400 to allow the stuck-reading watchdog to distinguish sensor hangs from a close bumper
+
+### Use Case 2: Tank or Bin Level Monitor
+- Mount sensor above the liquid or contents, pointed down
+- Use `(01) Millimeters` for a stable graph in Hubitat
+- Calculate fill percentage in Rule Machine using known tank depth
+- Trigger low-level alert when distance exceeds a threshold
+
+### Use Case 3: Entrance or Doorway Detector
+- Mount above doorway, pointed downward
+- Use `(07) Raw Millimeters` for faster response to approach
+- Set a short presence threshold (~1000mm) for detecting passage
+- Combine with time-of-day rules to trigger entry lighting or announcements
+
+### Use Case 4: Proximity Alert
+- Mount to detect objects entering a zone
+- Use `presence` attribute directly in automations
+- Adjust threshold and Report Delta to tune sensitivity
+
+---
+
+*End of User Guide*
+
+**Version:** 1.9 EQP OTA & 1.9 N1 OTA
+
+**Driver:** v1.28  
+**Last Updated:** 2026-04-09  
+**Hardware:** SparkFun ESP32-C6 Qwiic Pocket + VL53L1X, Arduino Nesso N1 + VL53L1X  
+**Development Environment:** Arduino IDE 2.x
