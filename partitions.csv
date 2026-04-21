@@ -1,0 +1,155 @@
+# =============================================================================
+# partitions.csv — ESP32-C6 Custom Partition Table
+# =============================================================================
+#
+# Target hardware : Arduino Nesso N1 (ESP32-C6, 16 MB flash)
+#                   SparkFun ESP32-C6 Qwiic Pocket (4 MB flash)
+# Flash mapped    : First 4 MB (0x000000 – 0x3FFFFF)
+#                   On the 16 MB Nesso N1 the remaining 12 MB is unused by
+#                   this table — no partitions are defined beyond 0x3FFFFF.
+# OTA capable     : Yes — two equal-sized app slots (app0 / app1)
+# Zigbee capable  : Yes — three dedicated Zigbee stack partitions
+#
+# -----------------------------------------------------------------------------
+# FULL FLASH MAP  (including regions not defined in this table)
+# -----------------------------------------------------------------------------
+#
+#   Address range        Size    Name / role
+#   ─────────────────────────────────────────────────────────────────────────
+#   0x000000 – 0x007FFF   32 KB  Bootloader  [NOT in table — hardcoded by IDF]
+#   0x008000 – 0x008FFF    4 KB  Partition table itself  [NOT in table]
+#   ─────────────────────────────────────────────────────────────────────────
+#   0x009000 – 0x00DFFF   20 KB  nvs          (NVS / Preferences)
+#   0x00E000 – 0x00FFFF    8 KB  otadata      (active OTA slot selector)
+#   0x010000 – 0x1BFFFF 1728 KB  app0         (OTA slot 0 — factory / primary)
+#   0x1C0000 – 0x36FFFF 1728 KB  app1         (OTA slot 1 — OTA target)
+#   0x370000 – 0x373FFF   16 KB  zb_storage   (Zigbee network data)
+#   0x374000 – 0x374FFF    4 KB  zb_fct       (Zigbee factory config)
+#   0x375000 – 0x378FFF   16 KB  zb_nvram     (Zigbee NVRAM / binding tables)
+#   0x379000 – 0x3F4FFF  496 KB  spiffs       (SPIFFS filesystem)
+#   0x3F5000 – 0x3FEFFF   40 KB  coredump     (crash dump storage)
+#   0x3FF000 – 0x3FFFFF    4 KB  phy_init     (RF / PHY calibration data)
+#   ─────────────────────────────────────────────────────────────────────────
+#   TOTAL (partitions only)      4060 KB  ← + 36 KB bootloader/table = 4096 KB
+#                                           = 4 MB  (entire first bank)
+#
+# -----------------------------------------------------------------------------
+# OTA SLOT SIZING NOTE
+# -----------------------------------------------------------------------------
+# Both app slots must be identical in size. 1728 KB (0x1B0000) was chosen to
+# leave room for the Zigbee, SPIFFS, coredump, and phy_init partitions while
+# keeping everything within the first 4 MB. The compiled sketch must be
+# smaller than 1728 KB for OTA updates to succeed; Arduino IDE shows binary
+# size after compile — check it against this limit.
+#
+# After a successful OTA upload, "otadata" is updated to point to the new
+# slot. On the next boot the IDF bootloader reads "otadata", validates the
+# new image, and launches it. If validation fails, it rolls back to the
+# previous slot automatically.
+#
+# -----------------------------------------------------------------------------
+# ZIGBEE PARTITION NOTE
+# -----------------------------------------------------------------------------
+# The ESP32-C6 Zigbee stack (esp-zigbee-sdk) requires exactly three
+# FAT-typed partitions with these exact names. Renaming or removing any of
+# them breaks Zigbee initialisation at runtime:
+#
+#   zb_storage  — Primary Zigbee NVS: network key, PAN ID, channel, device
+#                 address table, neighbour table, and other stack state that
+#                 must survive reboots. Zigbee.factoryReset() wipes this.
+#   zb_fct      — Factory configuration written once at first join and used
+#                 as the baseline for factory-reset restoration.
+#   zb_nvram    — Secondary Zigbee NVRAM: binding table, group table, and
+#                 additional stack state. Also wiped by Zigbee.factoryReset().
+#
+# All three use SubType "fat" so the Zigbee stack can use the FAT layer
+# directly without going through the main NVS key-value store.
+#
+# =============================================================================
+# Column reference
+#   Name    — Partition label (max 16 chars); used by esp_partition_find()
+#   Type    — "app" (executable) or "data" (everything else)
+#   SubType — Qualifies Type; see esp-idf docs for full list
+#   Offset  — Byte address in flash; must be 4 KB-aligned (0x1000)
+#             App partitions must additionally be 64 KB-aligned (0x10000)
+#   Size    — Partition size in bytes; must be a multiple of 4 KB (0x1000)
+#   Flags   — Optional; "encrypted" to enable flash encryption for this slot
+# =============================================================================
+
+# Name,     Type, SubType,  Offset,   Size,     Flags
+
+# ── System / NVS ─────────────────────────────────────────────────────────────
+# Standard ESP-IDF NVS (Non-Volatile Storage) partition.
+# Used by the Arduino Preferences library to persist settings across reboots:
+# OTA mode flag, WiFi-mode flag, and the rapid-reboot OTA timestamp.
+# 20 KB is the IDF-recommended minimum; larger is needed only if many
+# Preferences namespaces are in use simultaneously.
+nvs,        data, nvs,     0x9000,   0x5000,
+
+# ── OTA Bookkeeping ──────────────────────────────────────────────────────────
+# OTA data partition — mandatory when using two OTA app slots.
+# The IDF bootloader reads this 8 KB region to decide which app slot
+# (app0 or app1) contains the currently valid firmware image. On a clean
+# flash it is blank and the bootloader defaults to app0. After a successful
+# OTA upload the Zigbee-side "zigbee-mode" reboot or ElegantOTA library
+# updates this partition to point to the newly written slot.
+# Must be exactly 8 KB (0x2000) and must sit at 0xE000 — both are IDF
+# requirements.
+otadata,    data, ota,     0xE000,   0x2000,
+
+# ── Application Slots (OTA) ──────────────────────────────────────────────────
+# Two equal-sized OTA application slots — both must be the same size.
+# The bootloader selects the active slot based on "otadata" above.
+#
+# app0 (OTA slot 0) — 1728 KB (0x1B0000)
+# Factory / primary slot. This is where the sketch is written on first
+# flash via USB. Must start at a 64 KB boundary (0x10000 is standard).
+app0,       app,  ota_0,   0x10000,  0x1B0000,
+
+# app1 (OTA slot 1) — 1728 KB (0x1B0000)
+# OTA target slot. ElegantOTA writes the incoming firmware here while
+# app0 continues running. Identical size to app0 is required; the IDF
+# will reject an OTA image that is larger than the target slot.
+app1,       app,  ota_1,   0x1C0000, 0x1B0000,
+
+# ── Zigbee Stack Partitions ───────────────────────────────────────────────────
+# Three FAT partitions required by the ESP32-C6 Zigbee stack.
+# Names, types, and subtypes are fixed — the stack locates them by name.
+# See ZIGBEE PARTITION NOTE in the header above for full details.
+
+# zb_storage — 16 KB: primary Zigbee network state (NWK key, PAN, channel…)
+# Wiped by Zigbee.factoryReset() to force a clean re-pair with the hub.
+zb_storage, data, fat,     0x370000, 0x4000,
+
+# zb_fct — 4 KB: Zigbee factory / calibration configuration (written once).
+zb_fct,     data, fat,     0x374000, 0x1000,
+
+# zb_nvram — 16 KB: Zigbee binding table, group table, and additional NVRAM.
+# Also wiped by Zigbee.factoryReset().
+zb_nvram,   data, fat,     0x375000, 0x4000,
+
+# ── General-Purpose Filesystem ────────────────────────────────────────────────
+# SPIFFS (SPI Flash File System) — 496 KB (0x7C000).
+# Used by ElegantOTA and the web control panel (WiFi-only / OTA modes) to
+# serve static assets. Also available for user configuration files or logs.
+# SPIFFS has no subdirectory support; filenames are flat paths up to 32 chars.
+# Alternative: replace with "LittleFS" (same SubType spelling in IDF >= 5.x).
+spiffs,     data, spiffs,  0x379000, 0x7C000,
+
+# ── Crash Diagnostics ─────────────────────────────────────────────────────────
+# Core dump partition — 40 KB (0xA000).
+# When a crash occurs and core dump to flash is enabled in sdkconfig, the IDF
+# exception handler serialises CPU registers, stack frames, and heap state
+# here. Retrieve and decode post-mortem with:
+#   idf.py coredump-info  (requires ELF with debug symbols)
+# 40 KB is sufficient for single-core ESP32-C6 with a modest stack depth.
+# This partition is never written during normal operation.
+coredump,   data, coredump,0x3F5000, 0xA000,
+
+# ── RF Calibration Data ───────────────────────────────────────────────────────
+# PHY init data — 4 KB (0x1000) at the very top of the 4 MB region.
+# Contains RF calibration tables and PHY configuration used by the
+# radio subsystem at boot. Written by the factory test process; the IDF
+# reads it before initialising WiFi or the 802.15.4 (Zigbee) radio.
+# 0x3FF000 is the standard IDF location — do not move this partition.
+phy_init,   data, phy,     0x3FF000, 0x1000,
