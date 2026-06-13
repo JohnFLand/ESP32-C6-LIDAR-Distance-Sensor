@@ -2,8 +2,8 @@
   Zigbee Lidar Distance Sensor Driver
 
   Author:  Designed by John Land, but written by Claude (AI) & ChatGPT
-  Version: 1.28
-  Date:    2026-04-08
+  Version: 1.29
+  Date:    2026-06-12
 
   Description: Driver for ESP32-C6 Zigbee connected to VL53L1X Lidar Distance Sensor
   Distances reported in millimeters, centimeters, meters, inches, feet.
@@ -17,7 +17,7 @@
 */
 
 metadata {
-    definition (name: "Zigbee Lidar Distance Sensor", namespace: "John Land v. 1.28", author: "John Land") {
+    definition (name: "Zigbee Lidar Distance Sensor", namespace: "John Land v. 1.29", author: "John Land") {
         capability "Sensor"
         capability "IlluminanceMeasurement"  // For Zigbee compatibility
         capability "PresenceSensor"          // For occupancy detection
