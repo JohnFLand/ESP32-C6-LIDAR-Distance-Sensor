@@ -4,13 +4,14 @@
 =================================================================================
 ───────────────────────────────── Board Selection ───────────────────────────────
 =================================================================================
-        Combined sketch: ESP32-C6 Qwiic Pocket (EQP) and Arduino Nesso N1
+        Combined sketch: ESP32-C6 Qwiic Pocket (EQP), M5Stack NanoC6, or Arduino Nesso N1
 
 Uncomment exactly *ONE* of the following lines before compiling.
 Ensure Arduino IDE Tools settings match the selected board (see header below).
 */
-          #define BOARD_EQP           // ESP32-C6 Qwiic Pocket
-        //#define BOARD_NESSO_N1      // Arduino Nesso N1
+        //#define BOARD_EQP           // ESP32-C6 Qwiic Pocket
+        #define BOARD_NANOC6          // M5Stack NanoC6 (ESP32-C6)
+        //#define BOARD_NESSO_N1      // Arduino Nesso N1  (ESP32-C6)
 /*
 =================================================================================
 =================================================================================
@@ -23,21 +24,22 @@ The #ifdef guard is evaluated at compile time, so this is safe to leave here.
 #endif
 
 #ifdef BOARD_EQP
-  #define VERSION             "1.9 EQP OTA"
-  #define MODEL_VERSION_TOKEN "1.9 EQP_OTA"
+  #define VERSION  "1.9 EQP OTA"
 #endif
 #ifdef BOARD_NESSO_N1
-  #define VERSION             "1.9 N1 OTA"
-  #define MODEL_VERSION_TOKEN "1.9 N1_OTA"
+  #define VERSION  "1.9 N1 OTA"
+#endif
+#ifdef BOARD_NANOC6
+  #define VERSION  "1.9 NC6 OTA"
 #endif
 
 /* Author:  John Land
- * Date:    2026-04-08
+ * Date:    2026-05-19
  *
  * Designed for Zigbee integration with Hubitat.
  *
- * This sketch supports two hardware targets selected at compile time
- * via the BOARD_EQP / BOARD_NESSO_N1 define above:
+ * This sketch supports three hardware targets selected at compile time
+ * via the BOARD_EQP / BOARD_NESSO_N1 / BOARD_NANOC6 define above:
  *
  *  ── BOARD_EQP ────────────────────────────────────────────────────────────
  *  Hardware:
@@ -53,7 +55,8 @@ The #ifdef guard is evaluated at compile time, so this is safe to leave here.
  *   - Partition Scheme:   "Custom"[uses partitions.csv]
  *   - Zigbee Mode:        "Zigbee ED (end device)"
  *  Special features:
- *   - Hold BOOT button for BUTTON_HOLD_TIME seconds: factory reset
+ *   - Hold BOOT button 3–10s, then release: reboot (returns to normal Zigbee operation)
+ *   - Hold BOOT button 10s: factory reset & re-pairing (erases Zigbee NVS)
  *   - Power-cycle OTA entry: plug in, watch for 6s-cycle LED blink,
  *     unplug within OTA_WINDOW_MS seconds (initially 15s), plug in again
  *
@@ -78,12 +81,34 @@ The #ifdef guard is evaluated at compile time, so this is safe to leave here.
  *   - Long press Side Button:   factory reset & re-pairing (wipes Zigbee NVS)
  *   - Live distance readings on built-in 1.14" LCD
  *
+ *  ── BOARD_NANOC6 ─────────────────────────────────────────────────────────
+ *  Hardware:
+ *   - M5Stack NanoC6 (ESP32-C6FH4 @ 160 MHz, 4 MB Flash, no display)
+ *   - M5Stack Time-of-Flight Distance Unit (VL53L1X) via Grove connector
+ *  Hardware connections for VL53L1X:
+ *   - Connected via Grove/HY2.0-4P connector (Wire / I2C0)
+ *   - SDA -> G2 (Yellow wire), SCL -> G1 (White wire), 5V -> Red, GND -> Black
+ *  Arduino IDE Tool settings:
+ *   - Board:              "M5NanoC6" (install M5Stack board package first:
+ *                          Boards Manager URL: https://m5stack.oss-cn-shenzhen.aliyuncs.com/resource/arduino/package_m5stack_index.json)
+ *   - Erase All Flash:    ENABLED (until Zigbee pairing, then DISABLED for Zigbee stability)
+ *   - Partition Scheme:   "Custom" (uses partitions.csv) or "Minimal SPIFFS (1.9MB APP with OTA)"
+ *   - Zigbee Mode:        "Zigbee ED (end device)"
+ *  Special features:
+ *   - Hold BOOT (GPIO9) button 3–10s, then release: reboot (returns to normal Zigbee operation)
+ *   - Hold BOOT (GPIO9) button 10s: factory reset & re-pairing (erases Zigbee NVS)
+ *   - Power-cycle OTA entry: plug in, watch for 6s-cycle LED blink (blue LED G7),
+ *     unplug within OTA_WINDOW_MS seconds (initially 15s), plug in again
+ *
  *  ── Common ───────────────────────────────────────────────────────────────
  *  Required third-party libraries (both boards):
  *   - "SparkFun VL53L1X 4m Laser Distance Sensor" by SparkFun Electronics
  *   - "Zigbee.h"          included with the ESP32 Arduino core
  *   - "esp_zigbee_core.h" included with the ESP32 Arduino core
  *   - "ElegantOTA"        for Over-The-Air firmware updates
+ *
+ *  Required third-party libraries (BOARD_NANOC6 only):
+ *   - "Adafruit NeoPixel"  WS2812 RGB LED driver (install via Library Manager)
  *
  *  Required third-party libraries (BOARD_NESSO_N1 only):
  *   - "M5GFX"             display/touch — autodetects Nesso N1 hardware
@@ -121,6 +146,10 @@ The #ifdef guard is evaluated at compile time, so this is safe to leave here.
   #include <M5GFX.h>                      //Display/touch — autodetects Nesso N1 hardware
   #include <Arduino_Nesso_N1.h>           //Front Button/Side Button, LED_BUILTIN, POWEROFF expander pins
 #endif
+#ifdef BOARD_NANOC6
+  #include <Adafruit_NeoPixel.h>          //WS2812 RGB LED driver
+#endif
+
 #include <WebServer.h>                    //Used for ElegantOTA web server
 #include <ElegantOTA.h>                   //Used for Over-The-Air (OTA) firmware updates
 #include <WiFi.h>                         //Enables WiFi communication
@@ -140,8 +169,9 @@ The #ifdef guard is evaluated at compile time, so this is safe to leave here.
   #define LED_PIN           LED_BUILTIN   //Status LED (onboard LED)
   #define SENSOR_SDA        6             //EQP Qwiic SDA pin
   #define SENSOR_SCL        7             //EQP Qwiic SCL pin
-  #define BUTTON_PIN        BOOT_PIN      //EQP pairing/reset button
-  #define BUTTON_HOLD_TIME  3000          //Hold BOOT button 3 seconds for factory reset & pairing
+  #define BUTTON_PIN              BOOT_PIN  //EQP pairing/reset button
+  #define BUTTON_REBOOT_TIME          3000  //Hold ≥ 3s, release → reboot
+  #define BUTTON_FACTORY_RESET_TIME  10000  //Hold ≥ 10s → factory reset & re-pairing
   #define QWIIC_CONNECTED   true          //CRITICAL: true = use Wire1 (Qwiic), false = use Wire
 #endif
 
@@ -167,6 +197,19 @@ The #ifdef guard is evaluated at compile time, so this is safe to leave here.
   //  2 = Large  : Raw only, full screen, TFT_YELLOW, largest built-in font
   //  3 = Large  : Avg (green) alternating with Raw (yellow) every LARGE_DISPLAY_ALT_S seconds
   #define LARGE_DISPLAY_ALT_S  10   //Mode 3 only: seconds between alternating avg/raw distance values
+#endif
+
+//── BOARD_NANOC6 ──────────────────────────────────────────────────────────────
+#ifdef BOARD_NANOC6
+  #define OUTPUT_PIN        -1            //No spare GPIO exposed on Grove connector; -1 = disabled
+  #define LED_PIN           7             //Blue LED (G7, direct GPIO)
+  #define RGB_DATA_PIN      20            //WS2812 data (G20)
+  #define RGB_PWR_PIN       19            //WS2812 power enable (G19, must be HIGH)
+  #define SENSOR_SDA        2             //Grove SDA (G2, Yellow wire)
+  #define SENSOR_SCL        1             //Grove SCL (G1, White wire)
+  #define BUTTON_PIN        9             //BOOT / GPIO9 button (also used for download mode)
+  #define BUTTON_REBOOT_TIME          3000  //Hold ≥ 3s, release → reboot
+  #define BUTTON_FACTORY_RESET_TIME  10000  //Hold ≥ 10s → factory reset & re-pairing
 #endif
 
 //***********************************************
@@ -196,7 +239,6 @@ The #ifdef guard is evaluated at compile time, so this is safe to leave here.
     * - Using short presence threshold timeouts
     */
 
-
 #define DISTANCE_LONG_MODE        true //true = Long range (4 m); false = Short range (1.3 m)
 #define INTERMEASUREMENT_PERIOD   1000 //Time between measurements in ms; must be >= TIMING_BUDGET
 #define TIMING_BUDGET             200  //Measurement integration time in ms (15/20/33/50/100/200/500)
@@ -217,6 +259,10 @@ The #ifdef guard is evaluated at compile time, so this is safe to leave here.
 #ifdef BOARD_NESSO_N1
   static const char ZB_MANUFACTURER[] = "Arduino";
 #endif
+#ifdef BOARD_NANOC6
+  static const char ZB_MANUFACTURER[] = "M5Stack";
+#endif
+
 static String zbModelString = String("LIDAR_Sensor_v") + VERSION;  //Persistent string so Basic cluster model reads remain valid
   //The total length of zbModelString must be <= 32 characters to fit in the Zigbee Basic cluster model attribute,
   //which is used by Hubitat during pairing to identify the device type and assign the correct driver.
@@ -236,6 +282,10 @@ SFEVL53L1X distanceSensor;                                       //VL53L1X TOF s
 
 #ifdef BOARD_NESSO_N1
   M5GFX display;                                                 //Autodetects Nesso N1 hardware
+#endif
+
+#ifdef BOARD_NANOC6
+  Adafruit_NeoPixel rgbLed(1, RGB_DATA_PIN, NEO_GRB + NEO_KHZ800); //Single WS2812 on G20
 #endif
 
 WebServer server(80);                                            //Web server for ElegantOTA on port 80
@@ -283,9 +333,9 @@ const ulong ZIGBEE_RECONNECT_TIMEOUT = 300000UL;                 //Reboot to rej
 //Zigbee LED status handler
 enum LedState {
   LED_OFF,                                                       //LED completely off
-  LED_BLINKING,                                                  //Blink while connecting
-  LED_SOLID,                                                     //Solid on when connected
-  LED_SOS,                                                       //SOS pattern: OTA WiFi connect, OTA wait, power-cycle window
+  LED_BLINKING,                                                  //Blink while connecting (EQP/N1); blue LED off on NanoC6
+  LED_SOLID,                                                     //Solid on when connected (EQP/N1); blue LED off on NanoC6
+  LED_SOS,                                                       //SOS pattern: OTA WiFi connect, OTA wait, power-cycle window (all boards)
 };
 
 LedState currentLedState        = LED_BLINKING;                  //Default: blink while trying to connect to Zigbee
@@ -561,12 +611,37 @@ void beepTwice() {
 
 #endif  //BOARD_NESSO_N1 display and buzzer functions
 
+//==========================================================================
+//RGB LED HELPER (BOARD_NANOC6 only)
+//==========================================================================
+//The WS2812 on G20 gives an at-a-glance Zigbee status:
+//  Solid green = connected to Zigbee network
+//  Solid red   = not connected (searching, pairing, or in WiFi/OTA mode)
+//
+//Initialised to red in setup() so the correct colour is shown from the very first
+//frame — even on a commissioned device that reconnects before loop() runs.
+//Only calls rgbLed.show() on state transitions to avoid flooding the RMT peripheral.
+#ifdef BOARD_NANOC6
+void updateRgbLed(bool isConnected) {
+  static bool lastConnectedRgb = false;
+  if (isConnected == lastConnectedRgb) return;       //No change — skip the show() call
+  lastConnectedRgb = isConnected;
+
+  if (isConnected) {
+    rgbLed.setPixelColor(0, rgbLed.Color(0, 64, 0)); //Dim green — bright enough to see, not blinding
+  } else {
+    rgbLed.setPixelColor(0, rgbLed.Color(64, 0, 0)); //Red — not connected to Zigbee
+  }
+  rgbLed.show();
+}
+#endif  //BOARD_NANOC6 RGB LED helper
+
 //***********************************************
 //CHECK FOR RAPID REBOOT (OTA MODE TRIGGER)
 //***********************************************
 bool checkForOTAMode() {
   //How this works:
-  // Boot 1: Zigbee starts → setOTAFlag() → 3 LED flashes → "safe to unplug"
+  // Boot 1: Zigbee starts → setOTAFlag() → SOS blink pattern → "safe to unplug"
   // Boot 2 (genuine power-on): flag found + ESP_RST_POWERON → OTA mode
   //
   // CRITICAL: only ESP_RST_POWERON counts as a valid rapid reboot trigger.
@@ -615,7 +690,7 @@ void setOTAFlag() {
   preferences.end();                            //Force NVS commit
   delay(100);
 
-  Serial.println("\n[OTA] OTA flag set — LED will blink (6s cycle) for 15s. Unplug during that window for OTA mode.");
+  Serial.println("\n[OTA] OTA flag set — LED will blink SOS pattern for 15s. Unplug during that window for OTA mode.");
 }
 
 //*****************************************
@@ -637,6 +712,8 @@ String buildRootPage(const String& modeLabel, const String& extraRows, const Str
   p += "color:#fff;text-decoration:none;border:none;border-radius:4px;cursor:pointer;font-size:1em;line-height:1;}";
   p += ".btn-red{background:#cc2200;}";
   p += ".banner{padding:.6em 1em;border-radius:4px;margin:1em 0;font-weight:bold;}";
+  p += ".banner-err{background:#fee2e2;color:#7f1d1d;border:1px solid #f87171;}";
+  p += ".banner-warn{background:#fef9c3;color:#713f12;border:1px solid #fbbf24;}";
   p += "</style></head><body>";
   p += "<h2>&#128225; LIDAR Distance Sensor " VERSION "</h2>";
   p += "<h3>Device Status</h3><table>";
@@ -897,6 +974,10 @@ bool updateZigbeeLED() {                             //Use the built-in LED to s
   lastConnected = currentlyConnected;
   ulong now     = millis();
 
+#ifdef BOARD_NANOC6
+  updateRgbLed(currentlyConnected);                //Red when searching, solid green when connected
+#endif
+
   switch (currentLedState) {
     case LED_OFF:
       digitalWrite(LED_PIN, LOW);
@@ -904,16 +985,26 @@ bool updateZigbeeLED() {                             //Use the built-in LED to s
       break;
 
     case LED_SOLID:
+#ifdef BOARD_NANOC6
+      digitalWrite(LED_PIN, LOW);    //NanoC6: blue LED off when connected — RGB LED shows green
+      ledOn = false;
+#else
       digitalWrite(LED_PIN, HIGH);
       ledOn = true;
+#endif
       break;
 
     case LED_BLINKING:
+#ifdef BOARD_NANOC6
+      digitalWrite(LED_PIN, LOW);    //NanoC6: blue LED off when searching — RGB LED shows red
+      ledOn = false;
+#else
       if (now - lastLedChange >= 300) {              //300 ms blink interval
         ledOn = !ledOn;
         digitalWrite(LED_PIN, ledOn);
         lastLedChange = now;
       }
+#endif
       break;
 
     case LED_SOS:                                    //SOS pattern: ... --- ...
@@ -929,28 +1020,33 @@ bool updateZigbeeLED() {                             //Use the built-in LED to s
 }
 
 //── checkButtonPress ─────────────────────────────────────────────────────────
-//BOARD_EQP:      BOOT button held long enough → factory reset & re-pairing
+//BOARD_EQP / BOARD_NANOC6: two-tier BOOT button hold
+//  3–10s, release → simple reboot (returns to normal Zigbee operation)
+//  10s+           → factory reset & re-pairing (erases Zigbee NVS, auto-triggers)
 //BOARD_NESSO_N1: Front Button short = cycle display mode, long = OTA mode
 //                Side Button short  = reboot
 //                Side Button long   = factory reset & re-pairing
-#ifdef BOARD_EQP
+#if defined(BOARD_EQP) || defined(BOARD_NANOC6)
 void checkButtonPress() {
   if (digitalRead(BUTTON_PIN) == LOW) {                   //Check for BOOT button press
     delay(100);                                           //Debounce
-    currentLedState = LED_BLINKING;                       //Visual indicator: button pressed
     if (digitalRead(BUTTON_PIN) == LOW) {
+      currentLedState = LED_BLINKING;                     //Visual indicator: button pressed
       ulong start = millis();
-      bool messageShown = false;
+      bool rebootMessageShown = false;
 
       while (digitalRead(BUTTON_PIN) == LOW) {
         yield();                                          //Prevents WDT reset
-        if (!messageShown && (millis() - start > 500)) {
-          Serial.print("\n\nBOOT button pushed - hold for ");
-          Serial.print(BUTTON_HOLD_TIME / 1000);
-          Serial.println(" seconds for factory reset...");
-          messageShown = true;
+        ulong held = millis() - start;
+
+        //First threshold reached: tell the user their options
+        if (!rebootMessageShown && held >= BUTTON_REBOOT_TIME) {
+          Serial.println("\n\nBOOT button held — release now to reboot, or keep holding for 10s to factory reset...");
+          rebootMessageShown = true;
         }
-        if (millis() - start > BUTTON_HOLD_TIME) {
+
+        //Second threshold: factory reset (auto-triggers, no need to release)
+        if (held >= BUTTON_FACTORY_RESET_TIME) {
           Serial.println("\n*** FACTORY RESET ***");
           Serial.println("Resetting Zigbee and restarting...");
           preferences.begin("ota-mode", false);           //CRITICAL: clear OTA flag before reset
@@ -963,13 +1059,21 @@ void checkButtonPress() {
         }
         delay(50);
       }
-      if (messageShown) {
-        Serial.println("Button released early - reset cancelled");
+
+      //Button released — act based on how long it was held
+      if (millis() - start >= BUTTON_REBOOT_TIME) {
+        Serial.println("\nBOOT button released — rebooting...");
+        preferences.begin("ota-mode", false);             //CRITICAL: clear OTA flag before reboot
+        preferences.putULong("lastBoot", 0);
+        preferences.end();
+        delay(500);
+        ESP.restart();
       }
+      //else: held less than BUTTON_REBOOT_TIME — no action
     }
   }
 }
-#endif  //BOARD_EQP checkButtonPress
+#endif  //BOARD_EQP / BOARD_NANOC6 checkButtonPress
 
 #ifdef BOARD_NESSO_N1
 void checkButtonPress() {
@@ -1148,12 +1252,6 @@ void doRebootToOTA() {
   delay(1000);
   ESP.restart();
 }
-
-//***********************************************
-//REBOOT HELPERS (common)
-// Called from server.on() lambdas in multiple modes to consolidate
-// the repeated flag-clearing + restart sequences.
-//***********************************************
 
 //── doRebootToWiFiMode ────────────────────────────────────────────────────────
 //Re-enters WiFi-only mode on the next boot.  Called from the /reboot-wifi
@@ -1392,9 +1490,17 @@ void setup() {
   // BOARD_NESSO_N1: LED_PIN (LED_BUILTIN) is on the PI4IOE expander managed by M5GFX.
   //                 It is only usable AFTER display.init(), which is called after Serial.
 
-#ifdef BOARD_EQP
-  pinMode(LED_PIN, OUTPUT);                         //MUST be first on EQP — LED used for OTA flashes before normal init
+#if defined(BOARD_EQP) || defined(BOARD_NANOC6)
+  pinMode(LED_PIN, OUTPUT);                         //MUST be first — LED used for OTA flashes before normal init
   digitalWrite(LED_PIN, LOW);
+#endif
+
+#ifdef BOARD_NANOC6
+  pinMode(RGB_PWR_PIN, OUTPUT);
+  digitalWrite(RGB_PWR_PIN, HIGH);                  //Enable WS2812 power rail
+  rgbLed.begin();
+  rgbLed.setPixelColor(0, rgbLed.Color(64, 0, 0)); //Red initially — not yet connected
+  rgbLed.show();
 #endif
 
   Serial.begin(115200);
@@ -1413,6 +1519,9 @@ void setup() {
 #endif
 #ifdef BOARD_NESSO_N1
   printVersion(40, "Arduino Nesso N1 board", "", "");
+#endif
+#ifdef BOARD_NANOC6
+  printVersion(40, "M5Stack NanoC6 board", "", "");
 #endif
   printVersion(40, "Device Name : ", getDeviceName().c_str(), "");
   printVersion(40, "Device ID : ", getChipIdString().c_str(), "");
@@ -1443,8 +1552,8 @@ void setup() {
   /*
     ## How to Enter OTA Mode via Power Cycle:
     1. **Plug in power** — device boots and Zigbee starts
-    2. **Watch for LED blinking** (6s cycle: 3s on / 3s off) — flag is saved, OTA window is open
-    3. **Unplug power** within 30 seconds of the flashes
+    2. **Watch for LED blinking** the SOS pattern — flag is saved, OTA window is open
+    3. **Unplug power** within 15 seconds while the LED is blinking
     4. **Plug in power again** — device enters OTA mode!
     Note: if you don't unplug within the OTA window, the flag clears and normal
     power interruptions are safe.
@@ -1705,6 +1814,9 @@ void setup() {
   //                 at boot. Do NOT call Wire.begin() here — doing so triggers a
   //                 hardware I2C reset that disrupts the bus. Wire1 is unavailable
   //                 (GPIO 10/8 are LP I2C pins, not usable as I2C1).
+  // BOARD_NANOC6:   Wire (I2C0) on GPIO 2 (SDA) / GPIO 1 (SCL), the Grove/HY2.0-4P
+  //                 connector. No display library pre-initializes Wire, so Wire.begin()
+  //                 is called here explicitly.
   //
   // sensorBus is a global TwoWire* so reinitSensor() can reach it without
   // needing setup()'s local scope.
@@ -1716,6 +1828,11 @@ void setup() {
 #endif
 #ifdef BOARD_NESSO_N1
   sensorBus = &Wire;  // Already initialized by M5GFX on GPIO 10/8
+#endif
+#ifdef BOARD_NANOC6
+  sensorBus = &Wire;  // Grove connector: SDA=G2, SCL=G1
+  sensorBus->begin(SENSOR_SDA, SENSOR_SCL);
+  sensorBus->setClock(400000);
 #endif
   delay(1000);  //Some sensors need a delay after I2C init before they respond
 
@@ -1856,8 +1973,8 @@ void setup() {
   esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);  //Restore balanced coexistence after Zigbee init
   Serial.println("\nZigbee started successfully!");
 
-  //Zigbee started — set the OTA flag and flash LED 3 times.
-  //User can unplug immediately after the flashes to enter OTA mode on next boot.
+  //Zigbee started — set the OTA flag.
+  //The LED now blinks the SOS pattern for OTA_WINDOW_MS; unplug within that window to enter OTA mode on next boot.
   setOTAFlag();
 
   if (quickConnect) {
